@@ -7,7 +7,7 @@ export function attached(file: PromptFileAttachment) {
 
   if (file.source.type === "inline") return true
 
-  return file.source.uri.startsWith("data:")
+  return file.source.uri.startsWith("data:") || file.source.uri.startsWith("blob:")
 }
 
 // language metadata only; grammars stay behind shiki's lazy imports

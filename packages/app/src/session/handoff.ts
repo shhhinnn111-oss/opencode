@@ -1,5 +1,6 @@
 import type { SessionMessageUser } from "@opencode/client/promise"
 import { createStore } from "solid-js/store"
+import type { ServerSDK } from "@/runtime/server/client"
 
 const MAX = 40
 
@@ -27,4 +28,26 @@ export const clearSessionMessageHandoff = (key: string, messageID: string) => {
   if (messages[key]?.id !== messageID) return
   messageOrder.delete(key)
   setMessages(key, undefined)
+}
+
+export function createSessionMessageHandoff(key: string, sessionID: string, event: ServerSDK["event"]) {
+  let unsubscribe: VoidFunction | undefined
+
+  return {
+    set(message: SessionMessageUser) {
+      unsubscribe?.()
+      setSessionMessageHandoff(key, message)
+      unsubscribe = event.on("session.inbox.enqueued", (item) => {
+        if (item.data.sessionID !== sessionID || item.data.inboxID !== message.id) return
+        unsubscribe?.()
+        unsubscribe = undefined
+        clearSessionMessageHandoff(key, message.id)
+      })
+    },
+    clear(messageID: string) {
+      unsubscribe?.()
+      unsubscribe = undefined
+      clearSessionMessageHandoff(key, messageID)
+    },
+  }
 }

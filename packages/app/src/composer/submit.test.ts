@@ -229,6 +229,124 @@ describe("Composer submission", () => {
     expect(state.context.items()).toEqual([])
   })
 
+  test("keeps the prompt in the composer while selection commits, then clears and hands off attachments on admission", async () => {
+    const state = createMemoryComposerState().capture()
+
+    const prompt: Prompt = [
+      { type: "text", content: "ship it", start: 0, end: 7 },
+      {
+        type: "image",
+        id: "attachment",
+        filename: "image.png",
+        mime: "image/png",
+        blob: { id: "attachment", url: "data:image/png;base64,YQ==" },
+      },
+    ]
+
+    state.set(prompt)
+    state.context.add({ type: "file", path: "notes.md", description: "the failing version" })
+
+    const switching = Promise.withResolvers<void>()
+    const committed = Promise.withResolvers<void>()
+    const sending = Promise.withResolvers<void>()
+    const calls: string[] = []
+    const statuses: ("idle" | "running")[] = []
+    const handoffs: SessionMessageUser[] = []
+    const history: string[] = []
+
+    const target = session({
+      calls,
+      statuses,
+      current: () => ({ agent: "build", model: { providerID: "provider-1", id: "model-1", variant: "balanced" } }),
+      handoff: { set: (message) => handoffs.push(message), clear() {} },
+      switchModel: async () => {
+        calls.push("switch-model")
+        switching.resolve()
+        await committed.promise
+      },
+      prompt: async () => {
+        await sending.promise
+      },
+    })
+
+    const submission = submitInput(active(state, target), undefined, "normal", () => [], history)
+    const first = submission.submit(new Event("submit"))
+    await switching.promise
+
+    // Overlapping Enter while model selection is in flight must not send a second request.
+    await submission.submit(new Event("submit"))
+
+    expect(calls).toEqual(["switch-model"])
+    expect(state.current()).toEqual(prompt)
+    expect(state.context.items()).toHaveLength(1)
+    expect(statuses).toEqual([])
+    expect(handoffs).toEqual([])
+    expect(history).toEqual([])
+
+    committed.resolve()
+    await first
+
+    expect(calls).toEqual(["switch-model", "prompt"])
+    expect(state.current()).toEqual([{ type: "text", content: "", start: 0, end: 0 }])
+    expect(state.context.items()).toEqual([])
+    expect(statuses).toEqual(["running"])
+    expect(history).toEqual(["add:ship itimage"])
+    expect(handoffs).toMatchObject([
+      {
+        type: "user",
+        text: "ship it",
+        files: [
+          {
+            data: "",
+            mime: "image/png",
+            source: { type: "uri", uri: "data:image/png;base64,YQ==" },
+            name: "image.png",
+          },
+        ],
+      },
+    ])
+
+    sending.resolve()
+  })
+
+  test("keeps the draft intact without clearing or flashing history when model selection fails", async () => {
+    const state = createMemoryComposerState({ prompt: "ship it" }).capture()
+    state.context.add({ type: "file", path: "notes.md", description: "the failing version" })
+    const calls: string[] = []
+    const statuses: ("idle" | "running")[] = []
+    const history: string[] = []
+    const errors: unknown[] = []
+    const error = new Error("model unavailable")
+
+    const target = session({
+      calls,
+      statuses,
+      current: () => ({ agent: "build", model: { providerID: "provider-1", id: "model-1", variant: "balanced" } }),
+      switchModel: async () => {
+        calls.push("switch-model")
+        throw error
+      },
+    })
+
+    const submission = submitInput(
+      active(state, target),
+      { missingSelection() {}, unqueueable() {}, failed: (_kind, cause) => errors.push(cause) },
+      "normal",
+      () => [],
+      history,
+    )
+
+    await submission.submit(new Event("submit"))
+
+    expect(calls).toEqual(["switch-model"])
+    expect(errors).toEqual([error])
+    expect(statuses).toEqual([])
+    expect(history).toEqual([])
+    expect(state.current()).toEqual([{ type: "text", content: "ship it", start: 0, end: 7 }])
+    expect(state.context.items()).toHaveLength(1)
+    expect(state.retry.current()?.id).toMatch(/^msg_/)
+  })
+
   test("applies the captured agent and model before a custom command without passing over its overrides", async () => {
     const state = createMemoryComposerState({ prompt: "/review changes" }).capture()
     const calls: string[] = []
