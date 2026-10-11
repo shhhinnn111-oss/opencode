@@ -64,18 +64,31 @@ export function createProgramStatus(write: (sequence: string) => void) {
     write(sequence)
     records.set(id, sequence)
   }
+  const clear = () => {
+    if (records.size) {
+      // An unscoped clear would delete other programs' records too.
+      report("", { state: "idle" })
+      report("opencode", { state: "clear" })
+    }
+    records.clear()
+  }
   return {
     update(
       sessions: ProgramSession[],
       get: Parameters<typeof sessionProgramID>[1],
       auth = false,
       forms: ProgramSession["forms"] = [],
+      terminal: { status?: boolean; title?: boolean } = {},
     ) {
       if (disposed) return
+      if (terminal.status === false) {
+        clear()
+        return
+      }
       const candidates = sessions.map((session) => ({
         id: sessionProgramID(session.id, get),
         state: sessionProgramState(session),
-        title: session.title,
+        title: terminal.title === false ? undefined : session.title,
       }))
       // Reserve the root, namespace and global input; keep active work ahead of old idle subagents.
       const next = new Map(
@@ -120,12 +133,7 @@ export function createProgramStatus(write: (sequence: string) => void) {
     dispose() {
       if (disposed) return
       disposed = true
-      if (records.size) {
-        // An unscoped clear would delete other programs' records too.
-        report("", { state: "idle" })
-        report("opencode", { state: "clear" })
-      }
-      records.clear()
+      clear()
     },
   }
 }

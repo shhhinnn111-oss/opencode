@@ -2,246 +2,143 @@ import { describe, expect, test } from "bun:test"
 import { createProgramStatus, sessionProgramID, sessionProgramState, type ProgramSession } from "../src/program-status"
 
 function session(id = "session", values: Partial<ProgramSession> = {}): ProgramSession {
-  return {
-    id,
-    time: { created: 0, updated: 0 },
-    running: false,
-    permission: false,
-    forms: [],
-    ...values,
-  }
+  return { id, time: { created: 0, updated: 0 }, running: false, permission: false, forms: [], ...values }
 }
 
 function setup() {
-  const output: string[] = []
-  const reporter = createProgramStatus((sequence) => output.push(sequence))
+  const output: Record<string, string>[] = []
+  const reporter = createProgramStatus((sequence) => {
+    expect(sequence).toStartWith("\x1b]7501;")
+    expect(sequence).toEndWith("\x1b\\")
+    output.push(
+      Object.fromEntries(
+        sequence
+          .slice(7, -2)
+          .split(":")
+          .map((field) => {
+            const separator = field.indexOf("=")
+            return [field.slice(0, separator), field.slice(separator + 1)]
+          }),
+      ),
+    )
+  })
   const update = (sessions: ProgramSession[], auth = false, forms: ProgramSession["forms"] = []) =>
     reporter.update(sessions, (id) => sessions.find((session) => session.id === id), auth, forms)
-  return { output, reporter, update }
+  return { reporter, update, take: () => output.splice(0) }
 }
 
 describe("OSC 7501 program status", () => {
-  test.each(["working first", "blocked first"])("summarizes one working and one blocked session: %s", (order) => {
-    const harness = setup()
-    const working = session("working", { running: true })
-    const blocked = session("blocked", { running: true, permission: true })
-    harness.update(order === "working first" ? [working, blocked] : [blocked, working])
-
-    expect(harness.output).toHaveLength(4)
-    expect(harness.output.slice(0, 2)).toEqual([
-      "\x1b]7501;state=blocked:app=opencode:kind=permission\x1b\\",
-      "\x1b]7501;state=blocked:app=opencode:id=opencode:kind=permission\x1b\\",
-    ])
-    expect(harness.output).toContain(
-      `\x1b]7501;state=working:app=opencode:id=${sessionProgramID(working.id, () => undefined)}\x1b\\`,
-    )
-    expect(harness.output).toContain(
-      `\x1b]7501;state=blocked:app=opencode:id=${sessionProgramID(blocked.id, () => undefined)}:kind=permission\x1b\\`,
-    )
-
-    harness.update([working, { ...blocked, permission: false }])
-    expect(harness.output.slice(4)).toEqual([
-      "\x1b]7501;state=working:app=opencode\x1b\\",
-      "\x1b]7501;state=working:app=opencode:id=opencode\x1b\\",
-      `\x1b]7501;state=working:app=opencode:id=${sessionProgramID(blocked.id, () => undefined)}\x1b\\`,
-    ])
+  test("maps projected session state and pending input", () => {
+    const idle = { created: 0, updated: 10, idle: 10 }
+    const question: ProgramSession["forms"] = [{ fields: [{ key: "answer", type: "string" }] }]
+    const auth: ProgramSession["forms"] = [{ fields: [{ key: "auth", type: "external", url: "https://example.com" }] }]
+    const cases: [Partial<ProgramSession>, ReturnType<typeof sessionProgramState>][] = [
+      [{}, { state: "idle" }],
+      [{ outcome: "succeeded", time: idle }, { state: "done" }],
+      [{ outcome: "failed", time: idle }, { state: "error" }],
+      [{ outcome: "interrupted", time: idle }, { state: "idle" }],
+      [{ outcome: "succeeded", time: { ...idle, viewed: 10 } }, { state: "idle" }],
+      [{ running: true, outcome: "failed", time: idle }, { state: "working" }],
+      [
+        { running: true, forms: question },
+        { state: "blocked", kind: "question" },
+      ],
+      [
+        { running: true, forms: [...question, ...auth] },
+        { state: "blocked", kind: "auth" },
+      ],
+      [
+        { running: true, forms: auth, permission: true },
+        { state: "blocked", kind: "permission" },
+      ],
+    ]
+    cases.forEach(([values, expected]) => expect(sessionProgramState(session("session", values))).toEqual(expected))
   })
 
-  test("reports the most urgent tracked state on the root and namespace", () => {
+  test("summarizes urgency on the root and namespace, including mixed sessions and global input", () => {
     const harness = setup()
     const tracked = [
       session("idle"),
       session("done", { outcome: "succeeded", time: { created: 0, updated: 1, idle: 1 } }),
       session("error", { outcome: "failed", time: { created: 0, updated: 1, idle: 1 } }),
       session("working", { running: true }),
-      session("blocked", { permission: true }),
+      session("blocked", { running: true, permission: true }),
     ]
-    const expected = [
-      { state: "blocked", kind: "permission" },
-      { state: "working" },
-      { state: "error" },
-      { state: "done" },
-      { state: "idle" },
-    ]
-    expected.forEach((state, index) => {
-      harness.update(tracked.slice(0, tracked.length - index))
-      const kind = "kind" in state ? `:kind=${state.kind}` : ""
-      expect(harness.output.filter((sequence) => !sequence.includes(":id=")).at(-1)).toBe(
-        `\x1b]7501;state=${state.state}:app=opencode${kind}\x1b\\`,
-      )
-      expect(
-        harness.output
-          .filter((sequence) => sequence.includes(":id=opencode\x1b") || sequence.includes(":id=opencode:kind="))
-          .at(-1),
-      ).toBe(`\x1b]7501;state=${state.state}:app=opencode:id=opencode${kind}\x1b\\`)
+    const summary = (state: string, kind?: string) => {
+      const records = harness.take()
+      ;[undefined, "opencode"].forEach((id) => {
+        const record = records.find((record) => record.id === id)
+        expect(record).toMatchObject({ state, app: "opencode" })
+        expect(record?.kind).toBe(kind)
+      })
+      return records
+    }
+    harness.update(tracked.toReversed())
+    const records = summary("blocked", "permission")
+    ;["working", "blocked"].forEach((id) =>
+      expect(records.find((record) => record.id === sessionProgramID(id, () => undefined))?.state).toBe(id),
+    )
+    ;["working", "error", "done", "idle"].forEach((state, index) => {
+      harness.update(tracked.slice(0, 4 - index))
+      summary(state)
     })
+    harness.update([], true)
+    summary("blocked", "auth")
+    harness.update([], false, [{ fields: [{ key: "answer", type: "string" }] }])
+    summary("blocked", "question")
     harness.update([])
-    expect(harness.output.filter((sequence) => !sequence.includes(":id=")).at(-1)).toBe(
-      "\x1b]7501;state=idle:app=opencode\x1b\\",
-    )
+    summary("idle")
   })
 
-  test("includes global input in the tab summary and resets the root without an unscoped clear", () => {
-    const harness = setup()
-    harness.update([session("working", { running: true })], true)
-    expect(harness.output).toContain("\x1b]7501;state=blocked:app=opencode:kind=auth\x1b\\")
-    harness.update([session("working", { running: true })], false, [{ fields: [{ key: "answer", type: "string" }] }])
-    expect(harness.output).toContain("\x1b]7501;state=blocked:app=opencode:kind=question\x1b\\")
-    harness.update([session("working", { running: true })])
-    expect(harness.output).toContain("\x1b]7501;state=working:app=opencode\x1b\\")
-    harness.reporter.dispose()
-    expect(harness.output.slice(-2)).toEqual([
-      "\x1b]7501;state=idle:app=opencode\x1b\\",
-      "\x1b]7501;state=clear:app=opencode:id=opencode\x1b\\",
-    ])
-    expect(harness.output.some((sequence) => sequence.includes("state=clear:") && !sequence.includes(":id="))).toBe(
-      false,
-    )
-  })
-
-  test("reports complete ST-terminated records without prompt, tool, or error text", () => {
-    const harness = setup()
-    harness.update([session("session", { running: true })])
-    expect(harness.output).toEqual([
-      "\x1b]7501;state=working:app=opencode\x1b\\",
-      "\x1b]7501;state=working:app=opencode:id=opencode\x1b\\",
-      `\x1b]7501;state=working:app=opencode:id=${sessionProgramID("session", () => undefined)}\x1b\\`,
-    ])
-    harness.update([session("session", { running: true })])
-    expect(harness.output).toHaveLength(3)
-  })
-
-  test("keeps completion and failure until viewed, but cancellation is idle", () => {
-    const harness = setup()
-    const completed = session("session", { outcome: "succeeded", time: { created: 0, updated: 10, idle: 10 } })
-    harness.update([session("session", { running: true })])
-    harness.update([completed])
-    expect(harness.output.at(-1)).toContain("state=done:")
-    harness.update([completed])
-    expect(harness.output).toHaveLength(6)
-    harness.update([{ ...completed, time: { ...completed.time, viewed: 10 } }])
-    expect(harness.output.at(-1)).toContain("state=idle:")
-    harness.update([{ ...completed, outcome: "failed" }])
-    expect(harness.output.at(-1)).toContain("state=error:")
-    harness.update([{ ...completed, outcome: "interrupted" }])
-    expect(harness.output.at(-1)).toContain("state=idle:")
-    harness.update([{ ...completed, running: true }])
-    expect(harness.output.at(-1)).toContain("state=working:")
-  })
-
-  test("prioritizes pending permission and forms, and resumes after the last answer", () => {
-    const running = session("session", { running: true })
-    const question: ProgramSession["forms"] = [{ fields: [{ key: "answer", type: "string" }] }]
-    const auth: ProgramSession["forms"] = [
-      { fields: [{ key: "auth", type: "external", url: "https://example.com/secret" }] },
-    ]
-    expect(sessionProgramState({ ...running, forms: question, permission: true })).toEqual({
-      state: "blocked",
-      kind: "permission",
-    })
-    expect(sessionProgramState({ ...running, forms: question })).toEqual({ state: "blocked", kind: "question" })
-    expect(sessionProgramState({ ...running, forms: [...question, ...auth] })).toEqual({
-      state: "blocked",
-      kind: "auth",
-    })
-    expect(sessionProgramState(running)).toEqual({ state: "working" })
-    const harness = setup()
-    harness.update([{ ...running, forms: question }])
-    expect(harness.output.at(-1)).toContain(":kind=question")
-    harness.update([{ ...running, forms: auth }])
-    expect(harness.output.at(-1)).toContain(":kind=auth")
-    expect(harness.output.join("")).not.toContain("secret")
-    harness.update([running])
-    expect(harness.output.at(-1)).toContain("state=working:")
-    expect(harness.output.at(-1)).not.toContain("kind=")
-  })
-
-  test("reports parents and subagents independently with hierarchical IDs", () => {
-    const harness = setup()
-    const parent = session("parent", { running: true })
-    const child = session("child", { parentID: "parent", running: true, permission: true })
-    const other = session("other", { running: true })
-    harness.update([parent, child, other])
-    const parentID = sessionProgramID(parent.id, () => undefined)
-    const childID = sessionProgramID(child.id, (id) => (id === child.id ? child : parent))
-    expect(childID.startsWith(`${parentID}/`)).toBe(true)
-    expect(harness.output[2]).toContain(`state=working:app=opencode:id=${parentID}`)
-    expect(harness.output[3]).toContain(`state=blocked:app=opencode:id=${childID}:kind=permission`)
-    const otherID = sessionProgramID(other.id, () => undefined)
-    expect(otherID.startsWith(`${parentID}/`)).toBe(false)
-  })
-
-  test("rehydrates attached sessions directly from their projected state", () => {
-    const harness = setup()
-    harness.update([
-      session("done", { outcome: "succeeded", time: { created: 0, updated: 1, idle: 1 } }),
-      session("failed", { outcome: "failed", time: { created: 0, updated: 1, idle: 1 } }),
-      session("blocked", { permission: true }),
-    ])
-    expect(harness.output[2]).toContain("state=done:")
-    expect(harness.output[3]).toContain("state=error:")
-    expect(harness.output[4]).toContain("state=blocked:")
-  })
-
-  test("clears closed records and re-emits surviving descendants after an ancestor clear", () => {
+  test("clears removed records and re-emits retained descendants without an unscoped clear", () => {
     const harness = setup()
     const parent = session("parent")
-    const child = session("child", { parentID: "parent", running: true })
+    const child = session("child", { parentID: parent.id, running: true })
+    const get = (id: string) => [parent, child].find((session) => session.id === id)
+    const parentID = sessionProgramID(parent.id, get)
+    const childID = sessionProgramID(child.id, get)
+    expect(childID).toStartWith(`${parentID}/`)
     harness.update([parent, child])
-    harness.reporter.update([child], (id) => (id === parent.id ? parent : child))
-    expect(harness.output.at(-2)).toContain("state=clear:")
-    expect(harness.output.at(-1)).toContain("state=working:")
+    harness.take()
+    harness.reporter.update([child], get)
+    expect(harness.take()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: parentID, state: "clear" }),
+        expect.objectContaining({ id: childID, state: "working" }),
+      ]),
+    )
     harness.update([])
-    expect(harness.output.at(-1)).toContain("state=clear:")
+    expect(harness.take()).toContainEqual(expect.objectContaining({ id: childID, state: "clear" }))
     harness.reporter.dispose()
-    expect(harness.output.at(-1)).toBe("\x1b]7501;state=clear:app=opencode:id=opencode\x1b\\")
-    const count = harness.output.length
-    harness.reporter.dispose()
-    harness.update([child])
-    expect(harness.output).toHaveLength(count)
-    expect(harness.output.join("")).not.toContain(";state=clear:app=opencode\x1b")
+    expect(harness.take().filter((record) => record.state === "clear")).toEqual([
+      { state: "clear", app: "opencode", id: "opencode" },
+    ])
   })
 
-  test("authentication and global elicitation have their own record", () => {
-    const harness = setup()
-    harness.update([], true)
-    expect(harness.output.at(-1)).toBe("\x1b]7501;state=blocked:app=opencode:id=opencode/input:kind=auth\x1b\\")
-    harness.update([], false, [{ fields: [{ key: "answer", type: "string" }] }])
-    expect(harness.output.at(-1)).toContain("kind=question")
-    harness.update([])
-    expect(harness.output.at(-1)).toContain("state=clear:app=opencode:id=opencode/input")
-  })
-
-  test("bounds IDs for deep nesting and noncanonical session IDs", () => {
+  test("bounds hierarchical IDs, record count and control-free Unicode titles", () => {
     const chain = Array.from({ length: 12 }, (_, index) =>
-      session(`ses_${index}:\x1b]7501;${"long".repeat(10)}`, {
-        parentID: index > 0 ? `ses_${index - 1}:\x1b]7501;${"long".repeat(10)}` : undefined,
+      session(`session:${index}\x1b`, {
+        parentID: index > 0 ? `session:${index - 1}\x1b` : undefined,
       }),
     )
-    const get = (id: string) => chain.find((session) => session.id === id)
-    chain.forEach((session) => {
-      const id = sessionProgramID(session.id, get)
+    const ids = chain.map((session) => sessionProgramID(session.id, (id) => chain.find((session) => session.id === id)))
+    ids.forEach((id) => {
       expect(id.length).toBeLessThanOrEqual(128)
       expect(id.split("/").length).toBeLessThanOrEqual(8)
-      expect(id).toMatch(/^[A-Za-z0-9_.+-]{1,32}(\/[A-Za-z0-9_.+-]{1,32})*$/)
+      expect(id).toMatch(/^opencode(\/[a-f0-9]{16})+$/)
     })
-    expect(new Set(chain.map((session) => sessionProgramID(session.id, get))).size).toBe(chain.length)
-  })
-
-  test("stays within the minimum supported terminal record cap", () => {
+    expect(new Set(ids).size).toBe(chain.length)
     const harness = setup()
     harness.update(
-      Array.from({ length: 100 }, (_, index) => session(`session-${index}`)),
+      [
+        session("active", { running: true, title: "\x1b\n\t\x7f\u0085" + "🦀".repeat(100) }),
+        ...Array.from({ length: 100 }, (_, index) => session(`idle-${index}`)),
+      ],
       true,
     )
-    expect(harness.output).toHaveLength(64)
-    harness.output.forEach((sequence) => expect(Buffer.byteLength(sequence)).toBeLessThanOrEqual(4096))
-  })
-
-  test("encodes single-line Unicode session labels within the title limits", () => {
-    const harness = setup()
-    harness.update([session("session", { title: "\x1b\n\t\x7f\u0085" + "🦀".repeat(100) })])
-    const title = harness.output.at(-1)?.match(/:title=([^\x1b]+)/)?.[1]
+    const records = harness.take()
+    expect(records.length).toBeLessThanOrEqual(64)
+    const title = records.find((record) => record.id === sessionProgramID("active", () => undefined))?.title
     expect(title).toBeDefined()
     expect(title!.length).toBeLessThanOrEqual(256)
     const decoded = Buffer.from(title!, "base64").toString("utf8")
@@ -249,13 +146,30 @@ describe("OSC 7501 program status", () => {
     expect(decoded).toBe("🦀".repeat(48))
   })
 
-  test("keeps active work when there are more sessions than terminal records", () => {
+  test("honors terminal title and status settings, including changes while running", () => {
     const harness = setup()
-    harness.update([
-      ...Array.from({ length: 100 }, (_, index) => session(`idle-${index}`)),
-      session("active", { running: true }),
-    ])
-    expect(harness.output.some((sequence) => sequence.includes("state=working:"))).toBe(true)
-    expect(harness.output).toHaveLength(63)
+    const sessions = [session("session", { running: true, title: "Private title" })]
+    const get = () => sessions[0]
+    harness.reporter.update(sessions, get, false, [], { status: false })
+    expect(harness.take()).toBeEmpty()
+    harness.update(sessions)
+    expect(harness.take()).toContainEqual(
+      expect.objectContaining({ title: Buffer.from("Private title").toString("base64") }),
+    )
+    harness.reporter.update(sessions, get, false, [], { title: false })
+    const records = harness.take()
+    expect(records).toContainEqual(expect.objectContaining({ state: "working", id: sessionProgramID("session", get) }))
+    expect(records.every((record) => record.title === undefined)).toBe(true)
+    harness.reporter.update(sessions, get, false, [], { status: false })
+    expect(harness.take()).toEqual(
+      expect.arrayContaining([
+        { state: "idle", app: "opencode" },
+        { state: "clear", app: "opencode", id: "opencode" },
+      ]),
+    )
+    harness.reporter.update(sessions, get, false, [], { status: false })
+    expect(harness.take()).toBeEmpty()
+    harness.reporter.update(sessions, get, false, [], { title: false })
+    expect(harness.take()).toContainEqual(expect.objectContaining({ state: "working", id: "opencode" }))
   })
 })

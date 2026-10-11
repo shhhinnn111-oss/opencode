@@ -8,6 +8,7 @@ import { useRoute } from "./route"
 import { useSessionTabs } from "./session-tabs"
 import { useLocation } from "./location"
 import { useClient } from "./client"
+import { useConfig } from "../config"
 
 export const {
   context: ProgramStatusContext,
@@ -22,6 +23,7 @@ export const {
     const tabs = useSessionTabs()
     const location = useLocation()
     const client = useClient()
+    const config = useConfig()
     const [auth, setAuth] = createSignal(0)
     const reporter = createProgramStatus((sequence) => {
       if (!process.stdout.isTTY) return
@@ -64,6 +66,7 @@ export const {
         data.session.get,
         auth() > 0,
         data.session.form.list("global", location.ref) ?? [],
+        config.data.terminal,
       )
     })
     const dispose = () => reporter.dispose()
