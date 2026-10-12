@@ -6,7 +6,9 @@ import { TimelineDetailControl } from "@/settings/timeline-detail"
 import { useLanguage } from "@/runtime/i18n/language"
 import { usePlatform } from "@/runtime/platform/platform"
 import { ExtensionSettingsSections } from "@/runtime/extension/settings-page-view"
+import type { ScopedKey } from "@/runtime/server/scope"
 import {
+  type AutoApproveScope,
   type FollowUpBehavior,
   type TerminalPlacement,
   type WorkspaceDefaultDestination,
@@ -20,21 +22,34 @@ import "@/settings/settings.css"
 
 const tabLayoutOptions: ("horizontal" | "vertical")[] = ["horizontal", "vertical"]
 
-const AutoApprovePermissionsSetting: Component = () => {
+// "This project" is the project settings were opened from; without one, only every project can be chosen.
+const AutoApprovePermissionsSetting: Component<{ project: ScopedKey | undefined }> = (props) => {
   const language = useLanguage()
   const settings = useSettings()
+
+  const options = createMemo((): { value: AutoApproveScope; label: string }[] => [
+    { value: "off", label: language.t("settings.permissions.autoAccept.off") },
+    ...(props.project
+      ? [{ value: "project" as const, label: language.t("settings.permissions.autoAccept.project") }]
+      : []),
+    { value: "all", label: language.t("settings.permissions.autoAccept.all") },
+  ])
 
   return (
     <SettingsRow
       title={language.t("command.permissions.autoaccept.enable")}
-      description={language.t("toast.permissions.autoaccept.on.description")}
+      description={language.t("settings.permissions.autoAccept.description")}
     >
-      <div data-action="settings-auto-accept-permissions">
-        <Switch
-          checked={settings.permissions.autoApprove()}
-          onChange={(checked) => settings.permissions.setAutoApprove(checked)}
-        />
-      </div>
+      <Select
+        data-action="settings-auto-accept-permissions"
+        options={options()}
+        current={options().find((option) => option.value === settings.permissions.autoApproveScope(props.project))}
+        value={(option) => option.value}
+        label={(option) => option.label}
+        placement="bottom-end"
+        gutter={6}
+        onSelect={(option) => option && settings.permissions.setAutoApproveScope(props.project, option.value)}
+      />
     </SettingsRow>
   )
 }
@@ -217,7 +232,7 @@ const TabLayoutSetting = () => {
   )
 }
 
-export const SettingsGeneral: Component = () => {
+export const SettingsGeneral: Component<{ project?: ScopedKey }> = (props) => {
   const language = useLanguage()
   const platform = usePlatform()
   const settings = useSettings()
@@ -246,7 +261,7 @@ export const SettingsGeneral: Component = () => {
         <TabLayoutSetting />
 
         <WorkspaceDestinationSetting />
-        <AutoApprovePermissionsSetting />
+        <AutoApprovePermissionsSetting project={props.project} />
 
         <SettingsRow
           title={language.t("settings.general.row.showCustomAgents.title")}

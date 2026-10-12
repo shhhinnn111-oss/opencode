@@ -74,14 +74,21 @@ async function setup(page: Page, input: { tabs: TabSeed[]; a?: Partial<MockServe
       )
       .toBe(true)
 
-  const enableAutoAccept = async () => {
-    await page.keyboard.press("Control+,")
-    const autoAccept = page.getByTestId("settings-screen").locator('[data-action="settings-auto-accept-permissions"]')
-    await autoAccept.locator('[data-slot="switch-control"]').click()
-    await expect(autoAccept.getByRole("switch")).toBeChecked()
+  return {
+    replies,
+    sessionGets,
+    transport: servers[SERVER]!.transport,
+    listed,
+    enableAutoAccept: () => chooseAutoAccept(page, "All projects"),
   }
+}
 
-  return { replies, sessionGets, transport: servers[SERVER]!.transport, listed, enableAutoAccept }
+async function chooseAutoAccept(page: Page, scope: "This project" | "All projects") {
+  await page.keyboard.press("Control+,")
+  const autoAccept = page.getByTestId("settings-screen").locator('[data-action="settings-auto-accept-permissions"]')
+  await autoAccept.click()
+  await page.getByRole("option", { name: scope }).click()
+  await expect(autoAccept).toHaveText(scope)
 }
 
 const reply = (sessionID: string, permissionID: string) => ({
@@ -200,4 +207,49 @@ test("auto-accept approves a request discovered by opening a session", async ({ 
   await expectSessionTitle(page, sessionA.title)
   await view.enableAutoAccept()
   await expect.poll(() => view.replies).toEqual([reply(sessionA.id, "permission-synced-a")])
+})
+
+test("project auto-accept approves only that project's requests until every project is chosen", async ({ page }) => {
+  const api = session({ id: "ses_project_api", directory: "/work/api", title: "API session", projectID: "proj_api" })
+  const web = session({ id: "ses_project_web", directory: "/work/web", title: "Web session", projectID: "proj_web" })
+  const requests = { [api.id]: [pending("permission-api", api.id)], [web.id]: [pending("permission-web", web.id)] }
+  const replies: string[] = []
+  await mockServers(page, {
+    [SERVER]: {
+      directory: "/work/api",
+      project: project({ id: "proj_api", directory: "/work/api" }),
+      projects: [
+        project({ id: "proj_api", directory: "/work/api" }),
+        project({ id: "proj_web", directory: "/work/web" }),
+      ],
+      provider: { all: [], connected: [], default: {} },
+      sessions: [api, web],
+      pageMessages: () => ({ items: [] }),
+      sessionStatus: { [api.id]: { type: "running" }, [web.id]: { type: "running" } },
+      permissions: () => Object.values(requests).flat(),
+      sessionPermissions: requests,
+      onPermissionReply: (reply) => replies.push(reply.permissionID),
+    },
+  })
+  await seed(page, { tabs: [api.id, web.id] })
+  const dock = page.locator('[data-component="dock-prompt"][data-kind="permission"]')
+
+  await page.goto(sessionHref(web.id))
+  await expectSessionTitle(page, web.title)
+  await expect(dock).toBeVisible()
+  await page.locator(`[data-titlebar-tab-slot]:has(a[href="${sessionHref(api.id)}"])`).click()
+  await expectSessionTitle(page, api.title)
+  await chooseAutoAccept(page, "This project")
+  await expect.poll(() => replies).toEqual(["permission-api"])
+  await page.getByTestId("settings-screen").getByRole("button", { name: "Back to app" }).click()
+  await expectSessionTitle(page, api.title)
+  await expect(dock).toHaveCount(0)
+
+  await page.locator(`[data-titlebar-tab-slot]:has(a[href="${sessionHref(web.id)}"])`).click()
+  await expectSessionTitle(page, web.title)
+  await expect(dock.getByText("git status")).toBeVisible()
+  expect(replies).toEqual(["permission-api"])
+
+  await chooseAutoAccept(page, "All projects")
+  await expect.poll(() => replies).toEqual(["permission-api", "permission-web"])
 })

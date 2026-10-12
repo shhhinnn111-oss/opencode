@@ -23,6 +23,14 @@ export type NotificationSettings = Settings["notifications"]
 
 export type SoundSettings = Settings["sounds"]
 
+// Where permission requests are approved without asking, as seen from one project.
+export type AutoApproveScope = "off" | "project" | "all"
+
+// Names a project for per-project settings: project IDs are only unique within one server.
+export function projectSettingsKey(scope: ServerScope, projectID: string | undefined) {
+  return projectID ? ScopedKey.from(scope, projectID) : undefined
+}
+
 export const monoDefault = "IBM Plex Mono"
 
 export const sansDefault = "Inter"
@@ -127,7 +135,12 @@ const appearanceSchema = Persistence.struct({
 })
 
 const permissionsSchema = Persistence.struct({
+  // Approves requests in every project on every server.
   autoApprove: Schema.Boolean,
+  // Projects that approve requests on their own, keyed by server scope and project ID.
+  autoApproveProjects: Persistence.record(
+    Schema.Literal(true).pipe(Schema.catchDecoding(() => Effect.succeed(Option.none()))),
+  ),
 })
 
 const workspacesSchema = Persistence.struct({
@@ -274,7 +287,7 @@ export const defaultSettings: Settings = {
   },
   appearance: { fontSize: 14, mono: "", sans: "", terminal: "", tabLayout: "horizontal" },
   keybinds: {},
-  permissions: { autoApprove: false },
+  permissions: { autoApprove: false, autoApproveProjects: {} },
   workspaces: { defaultDestination: "last-used", lastUsed: {} },
   notifications: { agent: true, permissions: true, errors: false },
   sounds: {
@@ -313,6 +326,15 @@ export const { use: useSettings, provider: SettingsProvider } = createSimpleCont
       // face with the shell so that font discovery does not resize that mount.
       void document.fonts?.load(`440 13px ${mono}`).catch(() => undefined)
     })
+
+    // Where a project's requests are approved without asking; without a project only "all" can apply.
+    function autoApproveScope(project: ScopedKey | undefined): AutoApproveScope {
+      if (store.permissions?.autoApprove) return "all"
+
+      if (project && store.permissions?.autoApproveProjects?.[project]) return "project"
+
+      return "off"
+    }
 
     return {
       ready,
@@ -396,9 +418,24 @@ export const { use: useSettings, provider: SettingsProvider } = createSimpleCont
         },
       },
       permissions: {
-        autoApprove: withFallback(() => store.permissions?.autoApprove, defaultSettings.permissions.autoApprove),
-        setAutoApprove(value: boolean) {
-          setStore("permissions", "autoApprove", value)
+        autoApproveScope,
+        autoApproves: (project: ScopedKey | undefined) => autoApproveScope(project) !== "off",
+        // Whether any request on the server may be approved without asking.
+        autoApprovesOnServer(scope: ServerScope) {
+          if (store.permissions?.autoApprove) return true
+          const prefix = ScopedKey.prefix(scope)
+
+          return Object.keys(store.permissions?.autoApproveProjects ?? {}).some((key) => key.startsWith(prefix))
+        },
+        // "All projects" replaces every per-project choice, so turning it off later leaves nothing approving.
+        setAutoApproveScope(project: ScopedKey | undefined, value: AutoApproveScope) {
+          if (value === "all") return setStore("permissions", { autoApprove: true, autoApproveProjects: {} })
+          const projects = { ...store.permissions?.autoApproveProjects }
+
+          if (project && value === "project") projects[project] = true
+
+          if (project && value === "off") delete projects[project]
+          setStore("permissions", { autoApprove: false, autoApproveProjects: projects })
         },
       },
       workspaces: {

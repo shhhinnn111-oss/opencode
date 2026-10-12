@@ -39,7 +39,8 @@ export const clientSettings: Entry<SettingsRootTab>[] = [
     tab: "general",
     label: "command.permissions.autoaccept.enable",
     target: "settings-auto-accept-permissions",
-    keywords: "permissions approve allow auto accept",
+    description: "settings.permissions.autoAccept.description",
+    keywords: "permissions approve allow auto accept project",
   },
   {
     tab: "general",
