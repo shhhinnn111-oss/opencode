@@ -20,6 +20,7 @@ const callbackBindAttempts = 10
 const callbackBindRetryDelay = 200
 const pollingSafetyMargin = 3000
 const codexBaseURL = "https://chatgpt.com/backend-api/codex"
+const openaiResponsesURL = "https://api.openai.com/v1/responses"
 const browserMethodID = Integration.MethodID.make("chatgpt-browser")
 const headlessMethodID = Integration.MethodID.make("chatgpt-headless")
 // ChatGPT accounts lost gpt-5.4 and gpt-5.4-mini in Codex on 2026-08-31 (replacements: gpt-5.6-terra, gpt-5.6-luna).
@@ -316,6 +317,54 @@ export const OpenAIPlugin = define({
         }),
       { providerID: Provider.ID.openai },
     )
+    // The Codex backend and the Responses API reject uncompressed request bodies
+    // larger than ~1 MiB with a gateway 503, so compress them like the Codex CLI does.
+    yield* ctx.session.hook(
+      "http.request",
+      (evt) =>
+        Effect.gen(function* () {
+          if (evt.model.providerID !== Provider.ID.openai) return
+          if (evt.request.method !== "POST") return
+          if (!supportsRequestCompression(evt.request.url)) return
+          if (evt.request.headers.has("content-encoding")) return
+          if (!evt.request.headers.get("content-type")?.includes("application/json")) return
+          const compressed = compressRequestBody(yield* Effect.promise(() => evt.request.clone().text()))
+          if (!compressed) return
+          const headers = new Headers(evt.request.headers)
+          headers.set("content-encoding", "zstd")
+          headers.set("content-length", String(compressed.byteLength))
+          evt.request = new Request(evt.request, { headers, body: compressed })
+        }),
+      { providerID: Provider.ID.openai },
+    )
+    // A translated oversize failure must not retry: the gateway's answer is
+    // deterministic for these bytes, so retries only burn ~84s to reach the same error.
+    yield* ctx.session.hook(
+      "http.response",
+      (evt) =>
+        Effect.gen(function* () {
+          if (evt.model.providerID !== Provider.ID.openai) return
+          if (!supportsRequestCompression(evt.request.url)) return
+          const size = Number(evt.request.headers.get("content-length"))
+          if (!Number.isFinite(size) || size <= WIRE_SIZE_LIMIT) return
+          if (evt.response.status >= 200 && evt.response.status < 300) {
+            // Positive signal that the gateway cliff is gone or relaxed: an
+            // over-threshold body succeeded. Record it; nothing else observes this.
+            yield* Effect.logInfo("OpenAI request over the gateway wire limit succeeded", {
+              sessionID: evt.sessionID,
+              model: evt.model,
+              url: evt.request.url,
+              bytes: size,
+            })
+            return
+          }
+          if (evt.response.status !== 503) return
+          const text = yield* Effect.promise(() => evt.response.clone().text())
+          if (!UPSTREAM_RESET_TEXT.test(text)) return
+          evt.response = oversizeResponse(size, text)
+        }),
+      { providerID: Provider.ID.openai },
+    )
     // The ChatGPT backend rejects a requested output limit, and OpenAI counts one against rate limits.
     const omitOutputLimit = (evt: SessionRequest) =>
       Effect.sync(() => {
@@ -429,5 +478,57 @@ function claim(token: string) {
     claims.chatgpt_account_id ??
     claims["https://api.openai.com/auth"]?.chatgpt_account_id ??
     claims.organizations?.[0]?.id
+  )
+}
+
+// The Codex backend rejects uncompressed request bodies larger than ~1 MiB with
+// `503 upstream connect error ... reset reason: remote connection failure`, and the
+// same cliff was measured on the Responses API. The Codex CLI avoids it by
+// zstd-compressing these requests by default (`enable_request_compression`, stable
+// and on by default; zstd level 3), and OpenAI documents zstd request compression
+// for `POST /v1/responses`, so match it for both official endpoints. Compression
+// applies after the final JSON is rendered, so retries reuse the same bytes. Other
+// endpoints keep existing behavior: Content-Encoding has no negotiation mechanism,
+// and at least one Codex-compatible gateway (Zen Go) rejects unexpected zstd with
+// `400 invalid zstd request body`.
+function supportsRequestCompression(url: string) {
+  if (url === codexBaseURL || url.startsWith(`${codexBaseURL}/`)) return true
+  return (
+    url === openaiResponsesURL || url.startsWith(`${openaiResponsesURL}/`) || url.startsWith(`${openaiResponsesURL}?`)
+  )
+}
+
+function compressRequestBody(text: string) {
+  // Core also runs in runtimes without Bun (workerd); without zstd there is
+  // nothing to send but the existing uncompressed request.
+  if (typeof Bun === "undefined" || typeof Bun.zstdCompressSync !== "function") return undefined
+  // Compression must never break delivery: any failure keeps the existing request.
+  try {
+    return Bun.zstdCompressSync(text, { level: 3 })
+  } catch {
+    return undefined
+  }
+}
+
+// Largest wire size observed to succeed (1,048,575 bytes).
+// Anything larger failing with the gateway signature below is deterministic:
+// resending identical bytes cannot succeed, so it must not retry.
+const WIRE_SIZE_LIMIT = 1_048_576
+
+// The gateway reports an oversized body with this Envoy text; anything else is a
+// different failure and keeps existing handling.
+const UPSTREAM_RESET_TEXT = /upstream connect error or disconnect\/reset before headers/i
+
+function oversizeResponse(size: number, upstream: string) {
+  const mib = (size / 1_048_576).toFixed(1)
+  return new Response(
+    JSON.stringify({
+      error: {
+        message: `Request too large for the provider (${mib} MiB on the wire; the gateway rejects bodies over ~1 MiB even when compressed). Compact the session or remove images, then retry.`,
+        upstream_status: 503,
+        upstream_body: upstream.slice(0, 2000),
+      },
+    }),
+    { status: 413, headers: { "content-type": "application/json" } },
   )
 }
