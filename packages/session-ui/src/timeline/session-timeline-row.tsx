@@ -716,8 +716,6 @@ export function createSessionTimelineRowRenderer(input: {
         return value?.type === "user" ? value : undefined
       })
 
-      const context = createMemo(() => input.projection.userContextByID().get(current().userMessageID))
-
       return (
         <Frame row={current()}>
           <Show when={message()}>
@@ -733,8 +731,6 @@ export function createSessionTimelineRowRenderer(input: {
                       displayText={presentation()?.displayText}
                       comments={presentation()?.comments}
                       references={presentation()?.references}
-                      historicalAgent={context()?.agent ?? ""}
-                      historicalModel={context()?.model ?? { id: "", providerID: "" }}
                       actions={input.actions}
                     />
                   </div>
