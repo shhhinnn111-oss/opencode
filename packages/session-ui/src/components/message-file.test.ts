@@ -15,6 +15,7 @@ describe("message-file", () => {
   test("only treats data-backed files without mentions as attachments", () => {
     expect(attached(file({ type: "inline" }))).toBe(true)
     expect(attached(file({ type: "uri", uri: "data:text/plain;base64,SGVsbG8=" }))).toBe(true)
+    expect(attached(file({ type: "uri", uri: "blob:http://localhost/image-1" }))).toBe(true)
     expect(attached(file({ type: "uri", uri: "file:///repo/README.md" }))).toBe(false)
     expect(attached(file({ type: "inline" }, true))).toBe(false)
   })
