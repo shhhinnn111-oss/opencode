@@ -37,6 +37,13 @@ describe("settings timeline detail migration", () => {
 })
 
 describe("settings schema", () => {
+  test("restores new vertical tab placement while preserving old and invalid preferences", () => {
+    expect(decode({ appearance: { tabLayout: "vertical" } }).appearance.verticalTabPosition).toBe("bottom")
+    expect(decode({ appearance: { verticalTabPosition: "invalid" } }).appearance.verticalTabPosition).toBe("bottom")
+    const settings = decode({ appearance: { tabLayout: "vertical", verticalTabPosition: "top" } })
+    expect(decode(encode(settings)).appearance).toMatchObject({ tabLayout: "vertical", verticalTabPosition: "top" })
+  })
+
   test("keeps the values extensions copy out once and discards retired preferences", () => {
     const settings = decode({
       general: {
@@ -103,6 +110,7 @@ describe("settings schema", () => {
         sans: "",
         terminal: "",
         tabLayout: "horizontal",
+        verticalTabPosition: "bottom",
       },
       keybinds: {},
       permissions: { autoApprove: false },
@@ -148,6 +156,7 @@ describe("settings schema", () => {
       sans: "",
       terminal: "",
       tabLayout: "vertical",
+      verticalTabPosition: "bottom",
     })
     expect(settings.permissions.autoApprove).toBe(true)
     expect(settings.workspaces).toEqual({ defaultDestination: "new", lastUsed: { good: "workspace" } })
