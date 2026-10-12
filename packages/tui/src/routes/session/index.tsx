@@ -55,6 +55,14 @@ import { DialogSessionRename } from "../../component/dialog-session-rename"
 import { Sidebar } from "./sidebar"
 import { SubagentFooter } from "./subagent-footer.tsx"
 import { filetype } from "../../util/filetype"
+import { toolCodeTheme } from "../../theme/tool-code"
+import {
+  fitsInline,
+  formatToolInput,
+  inlineToolInput,
+  type ToolInputKind,
+  type ToolInputRow,
+} from "../../util/tool-input"
 import parsers from "../../parsers-config"
 import { errorMessage } from "../../util/error"
 import { Toast, useToast } from "../../ui/toast"
@@ -1798,6 +1806,8 @@ type ToolProps = {
 function GenericTool(props: ToolProps) {
   const { theme } = useTheme()
   const ctx = use()
+  // Never red: in the transcript red means a failed tool call.
+  const code = createMemo(() => toolCodeTheme(theme))
   const output = createMemo(() => props.output?.trim() ?? "")
   const [expanded, setExpanded] = createSignal(false)
   const maxLines = 3
@@ -1807,29 +1817,84 @@ function GenericTool(props: ToolProps) {
     if (expanded() || !collapsed().overflow) return output()
     return collapsed().output
   })
+  const showOutput = createMemo(() => Boolean(props.output && ctx.showGenericToolOutput()))
+  const inputBlock = createMemo(() => {
+    if (ctx.tui.syntax?.tool_input !== true || fitsInline(props.input)) return
+    return formatToolInput(props.input, (text) =>
+      expanded() ? { output: text, overflow: false } : collapseToolOutput(text, maxLines, maxChars()),
+    )
+  })
+  const overflow = createMemo(() => Boolean(inputBlock()?.overflow || (showOutput() && collapsed().overflow)))
 
   return (
-    <Show
-      when={props.output && ctx.showGenericToolOutput()}
-      fallback={
+    <Switch>
+      <Match when={inputBlock()}>
+        {(block) => (
+          <BlockTool
+            title={`# ${props.tool}`}
+            part={props.part}
+            onClick={overflow() ? () => setExpanded((prev) => !prev) : undefined}
+          >
+            <box gap={1}>
+              <ToolInput
+                rows={block().rows}
+                colors={{
+                  indent: code().text,
+                  key: code().syntaxVariable,
+                  punctuation: code().syntaxPunctuation,
+                  string: code().syntaxString,
+                  number: code().syntaxNumber,
+                  boolean: code().syntaxKeyword,
+                  null: code().syntaxKeyword,
+                  fold: code().textMuted,
+                }}
+              />
+              <Show when={showOutput()}>
+                <text fg={theme.text}>{limited()}</text>
+              </Show>
+              <Show when={overflow()}>
+                <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
+              </Show>
+            </box>
+          </BlockTool>
+        )}
+      </Match>
+      <Match when={!showOutput()}>
         <InlineTool icon="⚙" pending="Writing command…" complete={true} part={props.part}>
           {props.tool} {input(props.input)}
         </InlineTool>
-      }
-    >
-      <BlockTool
-        title={`# ${props.tool} ${input(props.input)}`}
-        part={props.part}
-        onClick={collapsed().overflow ? () => setExpanded((prev) => !prev) : undefined}
-      >
-        <box gap={1}>
-          <text fg={theme.text}>{limited()}</text>
-          <Show when={collapsed().overflow}>
-            <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
-          </Show>
-        </box>
-      </BlockTool>
-    </Show>
+      </Match>
+      <Match when={true}>
+        <BlockTool
+          title={`# ${props.tool} ${input(props.input)}`}
+          part={props.part}
+          onClick={collapsed().overflow ? () => setExpanded((prev) => !prev) : undefined}
+        >
+          <box gap={1}>
+            <text fg={theme.text}>{limited()}</text>
+            <Show when={collapsed().overflow}>
+              <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
+            </Show>
+          </box>
+        </BlockTool>
+      </Match>
+    </Switch>
+  )
+}
+
+// A tool's input as rows of key and value, each value colored by its type.
+export function ToolInput(props: { rows: ToolInputRow[]; colors: Record<ToolInputKind, RGBA> }) {
+  return (
+    <text>
+      <For each={props.rows}>
+        {(row, index) => (
+          <>
+            <Show when={index() > 0}>{"\n"}</Show>
+            <For each={row}>{(segment) => <span style={{ fg: props.colors[segment.kind] }}>{segment.text}</span>}</For>
+          </>
+        )}
+      </For>
+    </text>
   )
 }
 
@@ -2607,12 +2672,7 @@ function Diagnostics(props: { diagnostics: unknown; filePath: string }) {
 }
 
 function input(input: Record<string, unknown>, omit?: string[]): string {
-  const primitives = Object.entries(input).filter(([key, value]) => {
-    if (omit?.includes(key)) return false
-    return typeof value === "string" || typeof value === "number" || typeof value === "boolean"
-  })
-  if (primitives.length === 0) return ""
-  return `[${primitives.map(([key, value]) => `${key}=${value}`).join(", ")}]`
+  return inlineToolInput(input, omit)
 }
 
 function stringValue(value: unknown) {
