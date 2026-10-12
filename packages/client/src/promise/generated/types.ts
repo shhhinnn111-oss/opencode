@@ -210,6 +210,8 @@ export type IntegrationCommandAttemptStatus =
 
 export type McpStatusConnected = { status: "connected" }
 
+export type McpStatusIdle = { status: "idle" }
+
 export type McpStatusPending = { status: "pending" }
 
 export type McpStatusDisabled = { status: "disabled" }
@@ -681,7 +683,13 @@ export type IntegrationCommandAttempt = { attemptID: IntegrationAttemptID; time:
 
 export type McpServer = {
   name: string
-  status: McpStatusConnected | McpStatusPending | McpStatusDisabled | McpStatusFailed | McpStatusNeedsAuth
+  status:
+    | McpStatusConnected
+    | McpStatusIdle
+    | McpStatusPending
+    | McpStatusDisabled
+    | McpStatusFailed
+    | McpStatusNeedsAuth
   integrationID?: IntegrationID
 }
 
